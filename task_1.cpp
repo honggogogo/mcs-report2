@@ -131,16 +131,16 @@ private:
 
 //Added Bus Interface
 
-class Bus_if : public virtual sc_interface
+/*class Bus_if : public virtual sc_interface
 {
 public:
     virtual bool read(int addr) = 0;
     virtual bool write(int addr, int data) = 0;
-};
+};*/
 
 //Added Bus Module
 
-class Bus : public Bus_if, public sc_module
+class Bus : public sc_module
 {
 public:
     enum Function
@@ -150,23 +150,44 @@ public:
     };
     // ports
     sc_in<bool>             Port_CLK;
-    sc_inout_rv<32>         Port_BusAddress;
-    sc_inout<Function>      Port_BusFunction;
-    bool                    locked;
+    sc_in<int>              Port_BusAddress;
+    sc_in<Function>         Port_BusFunction;
+
     //std::mutex              mutex;
 public:
     SC_CTOR(Bus)
     {
+        SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
     // Handle Port_CLK to simulate delay
     // Initialize some bus properties
     }
+    
+private:
+    bool                    locked;
+    
+    void execute(){
+        while(true){
+            wait(Port_BusFunction.value_changed_event());
+            Function f = Port_BusFunction.read();
+            int addr = Port_BusAddress.read();
+            if(f == FUNC_READ){
+                read(addr);
+                
+            }
+            else{
+                write(addr,0);
+                
+            }
+            
+        }
+    }
     virtual bool read(int addr)
     {
         // Bus might be in contention
-        Port_BusAddress.write(addr);
-        Port_BusFunction.write(FUNC_READ);
+        //Port_BusAddress.write(addr);
+        //Port_BusFunction.write(FUNC_READ);
         wait(99);
         return true;
     }
@@ -174,8 +195,8 @@ public:
     virtual bool write(int addr, int data)
     {
         // Handle contention if any
-        Port_BusAddress.write(addr);
-        Port_BusFunction.write(FUNC_WRITE);
+        //Port_BusAddress.write(addr);
+        //Port_BusFunction.write(FUNC_WRITE);
         wait(99);
         // Data does not have to be handled in the simulation
         return true;
@@ -217,7 +238,9 @@ public:
     sc_out<int>     Port_Line;
     sc_out<int>     Port_Hit;
     sc_inout_rv<32> Port_Data;
-    sc_inout_rv<32> Port_BusAddress;
+    
+    sc_out<int>              Port_BusAddress;
+    sc_out<Bus::Function>      Port_BusFunction;
 
 
     SC_CTOR(Cache)
@@ -225,12 +248,12 @@ public:
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
-
+        
     }
 
     ~Cache()
     {
-        delete &c_data;                            //warning
+        //delete[] c_data;                            //warning
     }
 
 private:
@@ -241,6 +264,7 @@ private:
     
     void execute()
     {
+        
         while (true)
         {
             wait(Port_Func.value_changed_event());	// this is fine since we use sc_buffer
@@ -278,7 +302,10 @@ private:
                     Port_Hit.write(1);
                 }
                 if (set_index == -1){           //if miss simulate a read from the memory
-                    wait(99);                   // This simulates memory read/write delay
+                    
+                    Port_BusFunction.write(Bus::FUNC_READ);
+                    Port_BusAddress.write(addr);
+                                       // This simulates memory read/write delay
                     set_index = get_lru(index); //get the lru index
                     tags[index][set_index]=tag; //simulate read, copy data from memory to the cache
                     c_data[index][set_index*LINE_SIZE + offset] = set_index*offset; //random value instead of value from memory
@@ -299,6 +326,8 @@ private:
                         Port_Hit.write(2);
                         set_index = get_lru(index);
                         tags[index][set_index]=tag;
+                        Port_BusFunction.write(Bus::FUNC_WRITE);
+                        Port_BusAddress.write(addr);
                         wait(99);   //simulate memory delay
                     } else {
                         Port_Hit.write(3);
@@ -504,7 +533,8 @@ int sc_main(int argc, char* argv[])
         Bus     bus("bus");
         
         //Bus
-        sc_signal_rv<32>           BusAddress;
+        sc_signal<int>                  sigBusAddress;
+        sc_signal<Bus::Function>        sigBusFunction;
         
         // Signals
         sc_buffer<Cache::Function> sigMemFunc;
@@ -530,7 +560,8 @@ int sc_main(int argc, char* argv[])
         cache.Port_Line(sigCacheLine);
         cache.Port_Set(sigCacheSet);
         cache.Port_Tag(sigCacheTag);
-        cache.Port_BusAddress(BusAddress);
+        cache.Port_BusAddress(sigBusAddress);
+        cache.Port_BusFunction(sigBusFunction);
 
         cpu.Port_MemFunc(sigMemFunc);
         cpu.Port_MemAddr(sigMemAddr);
@@ -538,7 +569,8 @@ int sc_main(int argc, char* argv[])
         cpu.Port_MemDone(sigMemDone);
         cpu.Port_Hit(sigCacheHit);
 
-        bus.Port_BusAddress(BusAddress);
+        bus.Port_BusAddress(sigBusAddress);
+        bus.Port_BusFunction(sigBusFunction);
         
         bus.Port_CLK(clk);
         cache.Port_CLK(clk);
@@ -556,6 +588,8 @@ int sc_main(int argc, char* argv[])
         sc_trace(wf,sigCacheLine,"CacheLine");
         sc_trace(wf,sigCacheSet,"CacheSet");
         sc_trace(wf,sigCacheTag,"CacheTag");
+        sc_trace(wf,sigBusAddress,"BusAddress");
+        sc_trace(wf,sigBusFunction,"BusFunction");
 
 
         // Start Simulation
