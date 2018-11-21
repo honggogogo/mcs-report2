@@ -152,6 +152,7 @@ public:
     sc_in<bool>             Port_CLK;
     sc_in<int>              Port_BusAddress;
     sc_in<Function>         Port_BusFunction;
+    sc_out<int>             Port_BusLocked;
 
     //std::mutex              mutex;
 public:
@@ -170,6 +171,8 @@ private:
     void execute(){
         while(true){
             wait(Port_BusFunction.value_changed_event());
+            Port_BusLocked.write(1);
+            locked = 1;
             Function f = Port_BusFunction.read();
             int addr = Port_BusAddress.read();
             if(f == FUNC_READ){
@@ -180,7 +183,8 @@ private:
                 write(addr,0);
                 
             }
-            
+            Port_BusLocked.write(0);
+            locked=0;
         }
     }
     virtual bool read(int addr)
@@ -240,7 +244,8 @@ public:
     sc_inout_rv<32> Port_Data;
     
     sc_out<int>              Port_BusAddress;
-    sc_out<Bus::Function>      Port_BusFunction;
+    sc_out<Bus::Function>    Port_BusFunction;
+    sc_in<int>               Port_BusLocked;
 
 
     SC_CTOR(Cache)
@@ -248,6 +253,10 @@ public:
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
+        
+    }
+    
+    Cache() : Cache("cache"){
         
     }
 
@@ -282,16 +291,14 @@ private:
             int data = 0;
             if (f == FUNC_WRITE)
             {
-                cout << sc_time_stamp() << ": MEM received write" << endl;
+                cout << sc_time_stamp() << ": Cache received write" << endl;
                 data = Port_Data.read().to_int();   //cache reads from the cpu
             }
             else
             {
-                cout << sc_time_stamp() << ": MEM received read" << endl;
+                cout << sc_time_stamp() << ": Cache received read" << endl;
             }
 
-            
-            
 
             if (f == FUNC_READ)
             {
@@ -303,8 +310,7 @@ private:
                 }
                 if (set_index == -1){           //if miss simulate a read from the memory
                     
-                    Port_BusFunction.write(Bus::FUNC_READ);
-                    Port_BusAddress.write(addr);
+                    read_bus(addr);
                                        // This simulates memory read/write delay
                     set_index = get_lru(index); //get the lru index
                     tags[index][set_index]=tag; //simulate read, copy data from memory to the cache
@@ -326,8 +332,7 @@ private:
                         Port_Hit.write(2);
                         set_index = get_lru(index);
                         tags[index][set_index]=tag;
-                        Port_BusFunction.write(Bus::FUNC_WRITE);
-                        Port_BusAddress.write(addr);
+                        write_bus(addr,0);
                         wait(99);   //simulate memory delay
                     } else {
                         Port_Hit.write(3);
@@ -344,6 +349,29 @@ private:
                 Port_Done.write( RET_WRITE_DONE );
             }
         }
+    }
+    
+    int read_bus(int addr){
+        while(Port_BusLocked.read()){
+            wait(1);
+        }
+        
+        Port_BusFunction.write(Bus::FUNC_READ);
+        Port_BusAddress.write(addr);
+        
+        return 0;
+        
+    }
+    
+    bool write_bus(int addr, int data){
+        while(Port_BusLocked.read()){
+            wait(1);
+        }
+        
+        Port_BusFunction.write(Bus::FUNC_WRITE);
+        Port_BusAddress.write(addr);
+        
+        return true;
     }
 
     int hit(int index,int tag){ //returns the index of the line with the same tag or if miss -1
@@ -388,12 +416,18 @@ public:
     sc_out<int>                Port_MemAddr;
     sc_inout_rv<32>            Port_MemData;
     sc_in<int>                 Port_Hit;
+
     
     SC_CTOR(CPU) 
     {
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
+    }
+    
+        
+    CPU():CPU("cpu"){
+        
     }
 
 private:
@@ -523,73 +557,84 @@ int sc_main(int argc, char* argv[])
         // Get the tracefile argument and create Tracefile object
         // This function sets tracefile_ptr and num_cpus
         init_tracefile(&argc, &argv);
-
         // Initialize statistics counters
         stats_init();
 
         // Instantiate Modules
-        Cache   cache("cache");
-        CPU     cpu("cpu");
-        Bus     bus("bus");
+        Cache   cache[num_cpus];        
+        CPU     cpu[num_cpus];
+        
+        Bus    bus("bus");
         
         //Bus
         sc_signal<int>                  sigBusAddress;
         sc_signal<Bus::Function>        sigBusFunction;
+        sc_signal<int>                  sigBusLocked;
         
         // Signals
-        sc_buffer<Cache::Function> sigMemFunc;
-        sc_buffer<Cache::RetCode>  sigMemDone;
-        sc_signal<int>             sigMemAddr;
-        sc_signal_rv<32>           sigMemData;
+        sc_buffer<Cache::Function> sigMemFunc[num_cpus];
+        sc_buffer<Cache::RetCode>  sigMemDone[num_cpus];
+        sc_signal<int>             sigMemAddr[num_cpus];
+        sc_signal_rv<32>           sigMemData[num_cpus];
 
 
-        sc_signal<int>             sigCacheSet;
-        sc_signal<int>             sigCacheLine;
-        sc_signal<int>             sigCacheHit;
-        sc_signal<int>             sigCacheTag;
+        sc_signal<int>             sigCacheSet[num_cpus] ;
+        sc_signal<int>             sigCacheLine[num_cpus] ;
+        sc_signal<int>             sigCacheHit[num_cpus] ;
+        sc_signal<int>             sigCacheTag[num_cpus] ;
 
         // The clock that will drive the CPU and Memory
         sc_clock clk;
 
         // Connecting module ports with signals
-        cache.Port_Func(sigMemFunc);
-        cache.Port_Addr(sigMemAddr);
-        cache.Port_Data(sigMemData);
-        cache.Port_Done(sigMemDone);
-        cache.Port_Hit(sigCacheHit);
-        cache.Port_Line(sigCacheLine);
-        cache.Port_Set(sigCacheSet);
-        cache.Port_Tag(sigCacheTag);
-        cache.Port_BusAddress(sigBusAddress);
-        cache.Port_BusFunction(sigBusFunction);
+        for(int i = 0; i< num_cpus;i++){
+            cache[i].Port_Func(sigMemFunc[i]);
+            cache[i].Port_Addr(sigMemAddr[i]);
+            cache[i].Port_Data(sigMemData[i]);
+            cache[i].Port_Done(sigMemDone[i]);
+            cache[i].Port_Hit(sigCacheHit[i]);
+            cache[i].Port_Line(sigCacheLine[i]);
+            cache[i].Port_Set(sigCacheSet[i]);
+            cache[i].Port_Tag(sigCacheTag[i]);
+            cache[i].Port_BusAddress(sigBusAddress);
+            cache[i].Port_BusFunction(sigBusFunction);
+            cache[i].Port_BusLocked(sigBusLocked);
+            
+            cpu[i].Port_MemFunc(sigMemFunc[i]);
+            cpu[i].Port_MemAddr(sigMemAddr[i]);
+            cpu[i].Port_MemData(sigMemData[i]);
+            cpu[i].Port_MemDone(sigMemDone[i]);
+            cpu[i].Port_Hit(sigCacheHit[i]);
+            
+            cache[i].Port_CLK(clk);
+            cpu[i].Port_CLK(clk);
 
-        cpu.Port_MemFunc(sigMemFunc);
-        cpu.Port_MemAddr(sigMemAddr);
-        cpu.Port_MemData(sigMemData);
-        cpu.Port_MemDone(sigMemDone);
-        cpu.Port_Hit(sigCacheHit);
+                
+        }
+
 
         bus.Port_BusAddress(sigBusAddress);
         bus.Port_BusFunction(sigBusFunction);
+        bus.Port_BusLocked(sigBusLocked);
         
         bus.Port_CLK(clk);
-        cache.Port_CLK(clk);
-        cpu.Port_CLK(clk);
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
 
         sc_trace_file* wf;
         wf = sc_create_vcd_trace_file("task_1");
-        sc_trace(wf,sigMemFunc,"MemFunc");
-        sc_trace(wf,sigMemAddr,"MemAddr");
-        sc_trace(wf,sigMemData,"MemData");
-        sc_trace(wf,sigMemDone,"MemDone");
-        sc_trace(wf,sigCacheHit,"CacheHit");
-        sc_trace(wf,sigCacheLine,"CacheLine");
-        sc_trace(wf,sigCacheSet,"CacheSet");
-        sc_trace(wf,sigCacheTag,"CacheTag");
+        int i = 0;
+        sc_trace(wf,sigMemFunc[i],"MemFunc");
+        sc_trace(wf,sigMemAddr[i],"MemAddr");
+        sc_trace(wf,sigMemData[i],"MemData");
+        sc_trace(wf,sigMemDone[i],"MemDone");
+        sc_trace(wf,sigCacheHit[i],"CacheHit");
+        sc_trace(wf,sigCacheLine[i],"CacheLine");
+        sc_trace(wf,sigCacheSet[i],"CacheSet");
+        sc_trace(wf,sigCacheTag[i],"CacheTag");
         sc_trace(wf,sigBusAddress,"BusAddress");
         sc_trace(wf,sigBusFunction,"BusFunction");
+        sc_trace(wf,sigBusLocked,"BusLocked");
 
 
         // Start Simulation
