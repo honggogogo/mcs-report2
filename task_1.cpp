@@ -155,8 +155,9 @@ public:
     };
     // ports
     sc_in<bool>             Port_CLK;
-    sc_out<int>              Port_BusAddress;
-    sc_out<Function>         Port_BusFunction;
+    sc_signal_rv<int>       Port_BusAddress;
+    sc_out<int>             Port_BusWriter;
+    sc_out<Function>        Port_BusFunction;
     sc_out<int>             Port_BusLocked;
 
     //std::mutex              mutex;
@@ -172,18 +173,22 @@ public:
     virtual bool read(int addr)
     {
         // Bus might be in contention
+        locked = true;
         Port_BusAddress.write(addr);
         Port_BusFunction.write(FUNC_READ);
         wait(99);
+        locked = false;
         return true;
     }
     
     virtual bool write(int addr, int data)
     {
         // Handle contention if any
+        locked = true;
         Port_BusAddress.write(addr);
         Port_BusFunction.write(FUNC_WRITE);
         wait(99);
+        locked = false;
         // Data does not have to be handled in the simulation
         return true;
     }
@@ -296,7 +301,7 @@ private:
                 }
                 if (set_index == -1){           //if miss simulate a read from the memory
                     
-                    read_bus(addr);
+                    Port_Bus->read(addr);
                                        // This simulates memory read/write delay
                     set_index = get_lru(index); //get the lru index
                     tags[index][set_index]=tag; //simulate read, copy data from memory to the cache
@@ -318,7 +323,7 @@ private:
                         Port_Hit.write(2);
                         set_index = get_lru(index);
                         tags[index][set_index]=tag;
-                        write_bus(addr,0);
+                        //Port_Bus->write(addr,0);
                         wait(99);   //simulate memory delay
                     } else {
                         Port_Hit.write(3);
@@ -338,9 +343,7 @@ private:
     }
     
     int read_bus(int addr){
-        while(Port_BusLocked.read()){
-            wait(1);
-        }
+        
         
         //Port_BusFunction.write(Bus::FUNC_READ);
         //Port_BusAddress.write(addr);
@@ -350,9 +353,7 @@ private:
     }
     
     bool write_bus(int addr, int data){
-        while(Port_BusLocked.read()){
-            wait(1);
-        }
+        
         
         //Port_BusFunction.write(Bus::FUNC_WRITE);
         //Port_BusAddress.write(addr);
@@ -402,7 +403,9 @@ public:
     sc_out<int>                Port_MemAddr;
     sc_inout_rv<32>            Port_MemData;
     sc_in<int>                 Port_Hit;
-
+    
+    int cpu_id;
+    unsigned int counter = 0;
     
     SC_CTOR(CPU) 
     {
@@ -417,6 +420,7 @@ public:
     }
 
 private:
+    
     void execute() 
     {
         TraceFile::Entry    tr_data;
@@ -431,11 +435,13 @@ private:
 
         }*/
         // Loop until end of tracefile
-        while(!tracefile_ptr->eof()) //deactivate cpu for testing
+        while((!tracefile_ptr->eof()) && counter <=1000) //eof() function did not work
         {
-            eof_tracefile(tracefile_ptr);
+            counter ++;
+            //eof_tracefile(tracefile_ptr);
+           
             // Get the next action for the processor in the trace
-            if(!tracefile_ptr->next(0, tr_data))
+            if(!tracefile_ptr->next(cpu_id, tr_data))
             {
                 cerr << "Error reading trace for CPU" << endl;
                 break;
@@ -471,7 +477,8 @@ private:
 
                 default:
                     cerr << "Error, got invalid data from Trace" << endl;
-                    exit(0);
+                    //exit(0);
+                    break;
             }
 
             if(tr_data.type != TraceFile::ENTRY_TYPE_NOP)
@@ -505,10 +512,10 @@ private:
             else
             {
                 cout << sc_time_stamp() << ": "<< name() <<" executes NOP" <<endl;
+                
             }
             // Advance one cycle in simulated time            
             wait();
-            tracefile_ptr_old=tracefile_ptr;
         }
         
         // Finished the Tracefile, now stop the simulation
@@ -518,16 +525,16 @@ private:
     void stats(int hit_id){
         switch(hit_id){
             case 0:
-                stats_readmiss(0);
+                stats_readmiss(cpu_id);
                 break;
             case 1:
-                stats_readhit(0);
+                stats_readhit(cpu_id);
                 break;
             case 2:
-                stats_writemiss(0);
+                stats_writemiss(cpu_id);
                 break;
             case 3:
-                stats_writehit(0);
+                stats_writehit(cpu_id);
                 break;
             default:
                 break;
@@ -593,7 +600,7 @@ int sc_main(int argc, char* argv[])
             cpu[i].Port_MemData(sigMemData[i]);
             cpu[i].Port_MemDone(sigMemDone[i]);
             cpu[i].Port_Hit(sigCacheHit[i]);
-            
+            cpu[i].cpu_id = i;
             cache[i].Port_CLK(clk);
             cpu[i].Port_CLK(clk);
 
