@@ -42,6 +42,11 @@ static const int SET_COUNT = 128;     //There are 8 sets in the cache
 static const int SET_SIZE = 8;    //One set contains 125 lines
 static const int LINE_SIZE = 32;    //One line contais 32 Bytes
 
+TraceFile* tracefile_ptr_old;
+bool eof_tracefile(TraceFile* tracefile_ptr){
+    return tracefile_ptr_old == tracefile_ptr;
+}
+
 SC_MODULE(Memory) 
 {
 
@@ -131,16 +136,16 @@ private:
 
 //Added Bus Interface
 
-/*class Bus_if : public virtual sc_interface
+class Bus_if : public virtual sc_interface
 {
 public:
     virtual bool read(int addr) = 0;
     virtual bool write(int addr, int data) = 0;
-};*/
+};
 
 //Added Bus Module
 
-class Bus : public sc_module
+class Bus : public Bus_if , public sc_module
 {
 public:
     enum Function
@@ -150,48 +155,25 @@ public:
     };
     // ports
     sc_in<bool>             Port_CLK;
-    sc_in<int>              Port_BusAddress;
-    sc_in<Function>         Port_BusFunction;
+    sc_out<int>              Port_BusAddress;
+    sc_out<Function>         Port_BusFunction;
     sc_out<int>             Port_BusLocked;
 
     //std::mutex              mutex;
 public:
     SC_CTOR(Bus)
     {
-        SC_THREAD(execute);
+        
         sensitive << Port_CLK.pos();
-        dont_initialize();
+        
     // Handle Port_CLK to simulate delay
     // Initialize some bus properties
-    }
-    
-private:
-    bool                    locked;
-    
-    void execute(){
-        while(true){
-            wait(Port_BusFunction.value_changed_event());
-            Port_BusLocked.write(1);
-            locked = 1;
-            Function f = Port_BusFunction.read();
-            int addr = Port_BusAddress.read();
-            if(f == FUNC_READ){
-                read(addr);
-                
-            }
-            else{
-                write(addr,0);
-                
-            }
-            Port_BusLocked.write(0);
-            locked=0;
-        }
     }
     virtual bool read(int addr)
     {
         // Bus might be in contention
-        //Port_BusAddress.write(addr);
-        //Port_BusFunction.write(FUNC_READ);
+        Port_BusAddress.write(addr);
+        Port_BusFunction.write(FUNC_READ);
         wait(99);
         return true;
     }
@@ -199,12 +181,17 @@ private:
     virtual bool write(int addr, int data)
     {
         // Handle contention if any
-        //Port_BusAddress.write(addr);
-        //Port_BusFunction.write(FUNC_WRITE);
+        Port_BusAddress.write(addr);
+        Port_BusFunction.write(FUNC_WRITE);
         wait(99);
         // Data does not have to be handled in the simulation
         return true;
     }
+private:
+    bool                    locked;
+    
+
+
 };
 
 //Added Cache Module
@@ -243,9 +230,8 @@ public:
     sc_out<int>     Port_Hit;
     sc_inout_rv<32> Port_Data;
     
-    sc_out<int>              Port_BusAddress;
-    sc_out<Bus::Function>    Port_BusFunction;
-    sc_in<int>               Port_BusLocked;
+    sc_port<Bus_if> Port_Bus;
+    sc_in<int>      Port_BusLocked;
 
 
     SC_CTOR(Cache)
@@ -291,12 +277,12 @@ private:
             int data = 0;
             if (f == FUNC_WRITE)
             {
-                cout << sc_time_stamp() << ": Cache received write" << endl;
+                cout << sc_time_stamp() << ": " <<name()<<" received write" << endl;
                 data = Port_Data.read().to_int();   //cache reads from the cpu
             }
             else
             {
-                cout << sc_time_stamp() << ": Cache received read" << endl;
+                cout << sc_time_stamp() << ": " <<name()<<" received read" << endl;
             }
 
 
@@ -356,8 +342,8 @@ private:
             wait(1);
         }
         
-        Port_BusFunction.write(Bus::FUNC_READ);
-        Port_BusAddress.write(addr);
+        //Port_BusFunction.write(Bus::FUNC_READ);
+        //Port_BusAddress.write(addr);
         
         return 0;
         
@@ -368,8 +354,8 @@ private:
             wait(1);
         }
         
-        Port_BusFunction.write(Bus::FUNC_WRITE);
-        Port_BusAddress.write(addr);
+        //Port_BusFunction.write(Bus::FUNC_WRITE);
+        //Port_BusAddress.write(addr);
         
         return true;
     }
@@ -447,6 +433,7 @@ private:
         // Loop until end of tracefile
         while(!tracefile_ptr->eof()) //deactivate cpu for testing
         {
+            eof_tracefile(tracefile_ptr);
             // Get the next action for the processor in the trace
             if(!tracefile_ptr->next(0, tr_data))
             {
@@ -494,7 +481,7 @@ private:
 
                 if (f == Cache::FUNC_WRITE)
                 {
-                    cout << sc_time_stamp() << ": CPU sends write" << endl;
+                    cout << sc_time_stamp() << ": " <<name()<<" sends write" << endl;
 
                     uint32_t data = rand();
                     Port_MemData.write(data);
@@ -503,7 +490,7 @@ private:
                 }
                 else
                 {
-                    cout << sc_time_stamp() << ": CPU sends read" << endl;
+                    cout << sc_time_stamp() << ": " <<name()<<" sends read" << endl;
                 }
 
                 wait(Port_MemDone.value_changed_event());
@@ -512,15 +499,16 @@ private:
 
                 if (f == Cache::FUNC_READ)
                 {
-                    cout << sc_time_stamp() << ": CPU reads: " << Port_MemData.read() << endl;
+                    cout << sc_time_stamp() << ": " <<name()<<" reads: " << Port_MemData.read() << endl;
                 }
             }
             else
             {
-                cout << sc_time_stamp() << ": CPU executes NOP" << endl;
+                cout << sc_time_stamp() << ": "<< name() <<" executes NOP" <<endl;
             }
             // Advance one cycle in simulated time            
             wait();
+            tracefile_ptr_old=tracefile_ptr;
         }
         
         // Finished the Tracefile, now stop the simulation
@@ -587,7 +575,7 @@ int sc_main(int argc, char* argv[])
         sc_clock clk;
 
         // Connecting module ports with signals
-        for(int i = 0; i< num_cpus;i++){
+        for(unsigned int i = 0; i< num_cpus;i++){
             cache[i].Port_Func(sigMemFunc[i]);
             cache[i].Port_Addr(sigMemAddr[i]);
             cache[i].Port_Data(sigMemData[i]);
@@ -596,9 +584,9 @@ int sc_main(int argc, char* argv[])
             cache[i].Port_Line(sigCacheLine[i]);
             cache[i].Port_Set(sigCacheSet[i]);
             cache[i].Port_Tag(sigCacheTag[i]);
-            cache[i].Port_BusAddress(sigBusAddress);
-            cache[i].Port_BusFunction(sigBusFunction);
             cache[i].Port_BusLocked(sigBusLocked);
+            //bind bus
+            cache[i].Port_Bus(bus);
             
             cpu[i].Port_MemFunc(sigMemFunc[i]);
             cpu[i].Port_MemAddr(sigMemAddr[i]);
@@ -609,12 +597,13 @@ int sc_main(int argc, char* argv[])
             cache[i].Port_CLK(clk);
             cpu[i].Port_CLK(clk);
 
+            
                 
         }
 
-
         bus.Port_BusAddress(sigBusAddress);
         bus.Port_BusFunction(sigBusFunction);
+        
         bus.Port_BusLocked(sigBusLocked);
         
         bus.Port_CLK(clk);
